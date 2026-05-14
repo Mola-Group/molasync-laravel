@@ -1,0 +1,6 @@
+/tests export-ignore
+/.idea export-ignore
+/.phpunit.result.cache export-ignore
+/phpunit.xml export-ignore
+/composer.lock export-ignore
+/vendor export-ignore

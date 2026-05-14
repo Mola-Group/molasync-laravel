@@ -1,0 +1,52 @@
+{
+    "name": "molaprise/molasync-laravel",
+    "description": "Molasync is a modular Laravel integration layer that synchronizes external commerce services—such as TD Synnex XML APIs and tax providers—with WooCommerce, providing a unified and extensible foundation for catalog, pricing, inventory, and order workflows.",
+    "type": "library",
+    "keywords": [
+        "laravel",
+        "td-synnex",
+        "etilize",
+        "commerce",
+        "integration"
+    ],
+    "homepage": "https://github.com/Mola-Group/molasync-laravel",
+    "require": {
+        "php": "^8.2",
+        "ext-libxml": "*",
+        "ext-pdo": "*",
+        "ext-simplexml": "*",
+        "laravel/framework": "^12.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^11.0",
+        "laravel/pint": "^1.29"
+    },
+    "autoload": {
+        "psr-4": {
+            "Molaprise\\Molasync\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Molaprise\\Molasync\\Tests\\": "tests/"
+        }
+    },
+    "authors": [
+        {
+            "name": "Joseph Akitoye",
+            "email": "josepha@molaprise.com"
+        }
+    ],
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "support": {
+        "source": "https://github.com/Mola-Group/molasync-laravel"
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Molaprise\\Molasync\\MolasyncServiceProvider"
+            ]
+        }
+    }
+}
