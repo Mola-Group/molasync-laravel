@@ -24,16 +24,16 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
             return $this->resolveSampleModeProductId();
         }
 
-        $upcCandidates = $this->identifierCandidates( $identifiers[ 'upc' ] ?? null, true );
-        foreach ( $upcCandidates as $candidate ) {
-            $match = $this->resolveProductIdByUpc( $candidate );
-            if ( $match !== null ) return $match;
-        }
-
         $manufacturerPartCandidates = $this->identifierCandidates( $identifiers[ 'manufacturer_part_number' ] ?? null );
 
         foreach ( $manufacturerPartCandidates as $candidate ) {
             $match = $this->resolveProductIdByManufacturerPartNumber( $candidate );
+            if ( $match !== null ) return $match;
+        }
+
+        $upcCandidates = $this->identifierCandidates( $identifiers[ 'upc' ] ?? null, true );
+        foreach ( $upcCandidates as $candidate ) {
+            $match = $this->resolveProductIdByUpc( $candidate );
             if ( $match !== null ) return $match;
         }
 
