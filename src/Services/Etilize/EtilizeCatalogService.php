@@ -283,20 +283,6 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
             if ( $diagnostic[ 'product_id' ] !== null || $diagnostic[ 'status' ] === 'ambiguous' ) {
                 return $diagnostic;
             }
-
-            $diagnostic = $this->resolveFromModelColumns(
-                ProductSku::class,
-                'productskus',
-                'productid',
-                [ 'sku', 'vendorpartno', 'vendorpartnumber', 'partno', 'mfgpartno', 'manufactpartno', 'manufacturerpartnumber' ],
-                $candidate,
-                false,
-                'productskus.mpn'
-            );
-
-            if ( $diagnostic[ 'product_id' ] !== null || $diagnostic[ 'status' ] === 'ambiguous' ) {
-                return $diagnostic;
-            }
         }
 
         return $this->emptyDiagnostic( 'mpn', $candidates[ 0 ] ?? null );
