@@ -2,13 +2,15 @@
 
 namespace Molaprise\Molasync\Services\Etilize;
 
-use Illuminate\Database\Query\Builder;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Molaprise\Molasync\Contracts\EtilizeCatalogServiceInterface;
+use Molaprise\Molasync\Models\Etilize\Product;
 use Molaprise\Molasync\Models\Etilize\ProductSimilar;
+use Molaprise\Molasync\Models\Etilize\ProductSku;
+use Molaprise\Molasync\Models\Etilize\SearchAttribute;
 use Throwable;
 
 class EtilizeCatalogService implements EtilizeCatalogServiceInterface
@@ -20,34 +22,66 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
 
     public function resolveProductId(array $identifiers): ?int
     {
+        return $this->resolveProductIdWithDiagnostics( $identifiers )[ 'product_id' ] ?? null;
+    }
+
+    public function resolveProductIdWithDiagnostics(array $identifiers): array
+    {
         if ( $this->sampleModeEnabled() ) {
-            return $this->resolveSampleModeProductId();
+            return [
+                'product_id' => $this->resolveSampleModeProductId(),
+                'status' => 'sample_mode',
+                'source' => 'sample_mode',
+                'candidate' => null,
+                'match_count' => null,
+                'match_ids' => [],
+            ];
         }
 
         $manufacturerPartCandidates = $this->identifierCandidates( $identifiers[ 'manufacturer_part_number' ] ?? null );
 
         foreach ( $manufacturerPartCandidates as $candidate ) {
-            $match = $this->resolveProductIdByManufacturerPartNumber( $candidate );
-            if ( $match !== null ) return $match;
+            $diagnostic = $this->resolveProductIdByManufacturerPartNumberWithDiagnostics( $candidate );
+
+            if ( $diagnostic[ 'product_id' ] !== null || $diagnostic[ 'status' ] === 'ambiguous' ) {
+                return $diagnostic;
+            }
         }
 
         $upcCandidates = $this->identifierCandidates( $identifiers[ 'upc' ] ?? null, true );
+
         foreach ( $upcCandidates as $candidate ) {
-            $match = $this->resolveProductIdByUpc( $candidate );
-            if ( $match !== null ) return $match;
+            $diagnostic = $this->resolveProductIdByUpcWithDiagnostics( $candidate );
+
+            if ( $diagnostic[ 'product_id' ] !== null || $diagnostic[ 'status' ] === 'ambiguous' ) {
+                return $diagnostic;
+            }
         }
 
         foreach ( $manufacturerPartCandidates as $candidate ) {
-            $match = $this->resolveProductIdFromSearchAttributes( $candidate );
-            if ( $match !== null ) return $match;
+            $diagnostic = $this->resolveProductIdFromSearchAttributesWithDiagnostics( $candidate );
+
+            if ( $diagnostic[ 'product_id' ] !== null || $diagnostic[ 'status' ] === 'ambiguous' ) {
+                return $diagnostic;
+            }
         }
 
         foreach ( $upcCandidates as $candidate ) {
-            $match = $this->resolveProductIdFromSearchAttributes( $candidate );
-            if ( $match !== null ) return $match;
+            $diagnostic = $this->resolveProductIdFromSearchAttributesWithDiagnostics( $candidate );
+
+            if ( $diagnostic[ 'product_id' ] !== null || $diagnostic[ 'status' ] === 'ambiguous' ) {
+                return $diagnostic;
+            }
         }
 
-        return null;
+        return [
+            'product_id' => null,
+            'status' => 'not_found',
+            'source' => 'resolver',
+            'candidate' => $manufacturerPartCandidates[ 0 ] ?? $upcCandidates[ 0 ] ?? null,
+            'match_count' => 0,
+            'match_ids' => [],
+        ];
     }
 
     private function identifierCandidates(?string $value, bool $digitsOnly = false): array
@@ -82,51 +116,74 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
 
     public function resolveProductIdByUpc(?string $upc): ?int
     {
+        return $this->resolveProductIdByUpcWithDiagnostics( $upc )[ 'product_id' ] ?? null;
+    }
+
+    private function resolveProductIdByUpcWithDiagnostics(?string $upc): array
+    {
         $candidates = $this->identifierCandidates( $upc, true );
+
         if ( $candidates === [] ) {
-            return null;
+            return $this->emptyDiagnostic( 'upc', null );
         }
 
         foreach ( $candidates as $candidate ) {
-            $match = $this->resolveFromTableColumns( 'product', 'productid', [ 'upc', 'gtin', 'ean' ], $candidate, true );
+            $diagnostic = $this->resolveFromModelColumns(
+                Product::class,
+                'product',
+                'productid',
+                [ 'upc', 'gtin', 'ean' ],
+                $candidate,
+                true,
+                'product.upc'
+            );
 
-            if ( $match !== null ) return $match;
+            if ( $diagnostic[ 'product_id' ] !== null || $diagnostic[ 'status' ] === 'ambiguous' ) {
+                return $diagnostic;
+            }
 
-            $match = $this->resolveFromTableColumns(
+            $diagnostic = $this->resolveFromModelColumns(
+                ProductSku::class,
                 'productskus',
                 'productid',
                 [ 'upc', 'upccode', 'gtin', 'ean', 'ean13', 'barcode' ],
                 $candidate,
-                false
+                false,
+                'productskus.upc'
             );
 
-            if ( $match !== null ) return $match;
+            if ( $diagnostic[ 'product_id' ] !== null || $diagnostic[ 'status' ] === 'ambiguous' ) {
+                return $diagnostic;
+            }
         }
 
-        return null;
+        return $this->emptyDiagnostic( 'upc', $candidates[ 0 ] ?? null );
     }
 
-    private function resolveFromTableColumns(
+    private function resolveFromModelColumns(
+        string $modelClass,
         string $table,
         string $idColumn,
-        array  $candidateColumns,
+        array $candidateColumns,
         string $value,
-        bool   $activeProductsOnly = false
-    ): ?int
+        bool $activeProductsOnly = false,
+        ?string $source = null
+    ): array
     {
         try {
             if ( !$this->tableExists( $table ) ) {
-                return null;
+                return $this->emptyDiagnostic( $source ?? $table, $value, 'table_missing' );
             }
 
             $availableColumns = $this->getColumnListing( $table );
             $matchColumns = array_values( array_intersect( $availableColumns, array_map( 'strtolower', $candidateColumns ) ) );
 
             if ( $matchColumns === [] || !in_array( strtolower( $idColumn ), $availableColumns, true ) ) {
-                return null;
+                return $this->emptyDiagnostic( $source ?? $table, $value, 'columns_missing' );
             }
 
-            $query = DB::connection( 'etilize' )->table( $table );
+            /** @var \Illuminate\Database\Eloquent\Model $modelClass */
+            $query = $modelClass::query();
 
             if ( $activeProductsOnly && in_array( 'isactive', $availableColumns, true ) ) {
                 $query->where( 'isactive', '=', 1 );
@@ -150,9 +207,27 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
                 ->unique()
                 ->values();
 
-            return $matches->count() === 1 ? $matches->first() : null;
+            return match ( true ) {
+                $matches->count() === 1 => [
+                    'product_id' => $matches->first(),
+                    'status' => 'matched',
+                    'source' => $source ?? $table,
+                    'candidate' => $value,
+                    'match_count' => 1,
+                    'match_ids' => $matches->all(),
+                ],
+                $matches->count() > 1 => [
+                    'product_id' => null,
+                    'status' => 'ambiguous',
+                    'source' => $source ?? $table,
+                    'candidate' => $value,
+                    'match_count' => $matches->count(),
+                    'match_ids' => $matches->all(),
+                ],
+                default => $this->emptyDiagnostic( $source ?? $table, $value ),
+            };
         } catch ( Throwable ) {
-            return null;
+            return $this->emptyDiagnostic( $source ?? $table, $value, 'query_error' );
         }
     }
 
@@ -185,35 +260,61 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
 
     public function resolveProductIdByManufacturerPartNumber(?string $manufacturerPartNumber): ?int
     {
+        return $this->resolveProductIdByManufacturerPartNumberWithDiagnostics( $manufacturerPartNumber )[ 'product_id' ] ?? null;
+    }
+
+    private function resolveProductIdByManufacturerPartNumberWithDiagnostics(?string $manufacturerPartNumber): array
+    {
         $candidates = $this->identifierCandidates( $manufacturerPartNumber );
 
-        if ( $candidates === [] ) return null;
+        if ( $candidates === [] ) return $this->emptyDiagnostic( 'mpn', null );
 
         foreach ( $candidates as $candidate ) {
-            $match = $this->resolveFromTableColumns( 'product', 'productid', [ 'mfgpartno' ], $candidate, true );
+            $diagnostic = $this->resolveFromModelColumns(
+                Product::class,
+                'product',
+                'productid',
+                [ 'mfgpartno' ],
+                $candidate,
+                true,
+                'product.mfgpartno'
+            );
 
-            if ( $match !== null ) return $match;
+            if ( $diagnostic[ 'product_id' ] !== null || $diagnostic[ 'status' ] === 'ambiguous' ) {
+                return $diagnostic;
+            }
 
-            $match = $this->resolveFromTableColumns(
+            $diagnostic = $this->resolveFromModelColumns(
+                ProductSku::class,
                 'productskus',
                 'productid',
                 [ 'sku', 'vendorpartno', 'vendorpartnumber', 'partno', 'mfgpartno', 'manufactpartno', 'manufacturerpartnumber' ],
                 $candidate,
-                false
+                false,
+                'productskus.mpn'
             );
 
-            if ( $match !== null ) return $match;
+            if ( $diagnostic[ 'product_id' ] !== null || $diagnostic[ 'status' ] === 'ambiguous' ) {
+                return $diagnostic;
+            }
         }
 
-        return null;
+        return $this->emptyDiagnostic( 'mpn', $candidates[ 0 ] ?? null );
     }
 
     private function resolveProductIdFromSearchAttributes(string $value): ?int
     {
-        try {
-            if ( !$this->tableExists( 'search_attribute' ) || !$this->tableExists( 'search_attribute_values' ) ) return null;
+        return $this->resolveProductIdFromSearchAttributesWithDiagnostics( $value )[ 'product_id' ] ?? null;
+    }
 
-            $matches = DB::connection( 'etilize' )->table( 'search_attribute' )
+    private function resolveProductIdFromSearchAttributesWithDiagnostics(string $value): array
+    {
+        try {
+            if ( !$this->tableExists( 'search_attribute' ) || !$this->tableExists( 'search_attribute_values' ) ) {
+                return $this->emptyDiagnostic( 'search_attribute', $value, 'table_missing' );
+            }
+
+            $matches = SearchAttribute::query()
                 ->join( 'search_attribute_values', 'search_attribute_values.valueid', '=', 'search_attribute.valueid' )
                 ->join( 'product', 'search_attribute.productid', '=', 'product.productid' )
                 ->where( 'search_attribute_values.value', '=', $value )
@@ -224,10 +325,40 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
                 ->unique()
                 ->values();
 
-            return $matches->count() === 1 ? $matches->first() : null;
+            return match ( true ) {
+                $matches->count() === 1 => [
+                    'product_id' => $matches->first(),
+                    'status' => 'matched',
+                    'source' => 'search_attribute',
+                    'candidate' => $value,
+                    'match_count' => 1,
+                    'match_ids' => $matches->all(),
+                ],
+                $matches->count() > 1 => [
+                    'product_id' => null,
+                    'status' => 'ambiguous',
+                    'source' => 'search_attribute',
+                    'candidate' => $value,
+                    'match_count' => $matches->count(),
+                    'match_ids' => $matches->all(),
+                ],
+                default => $this->emptyDiagnostic( 'search_attribute', $value ),
+            };
         } catch ( Throwable ) {
-            return null;
+            return $this->emptyDiagnostic( 'search_attribute', $value, 'query_error' );
         }
+    }
+
+    private function emptyDiagnostic(string $source, ?string $candidate, string $status = 'not_found'): array
+    {
+        return [
+            'product_id' => null,
+            'status' => $status,
+            'source' => $source,
+            'candidate' => $candidate,
+            'match_count' => 0,
+            'match_ids' => [],
+        ];
     }
 
     private function sampleModeEnabled(): bool
@@ -302,7 +433,7 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
             return [ (int)$cachedRange[ 0 ], (int)$cachedRange[ 1 ] ];
         }
 
-        $query = DB::connection( 'etilize' )->table( 'product' );
+        $query = Product::query();
 
         if ( in_array( 'isactive', $availableColumns, true ) ) {
             $query->where( 'isactive', '=', 1 );
@@ -331,7 +462,7 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
         ?int $beforeProductId = null
     ): ?int
     {
-        $query = DB::connection( 'etilize' )->table( 'product' )
+        $query = Product::query()
             ->where( 'productid', '>=', $startProductId );
 
         if ( $beforeProductId !== null ) {
@@ -359,7 +490,6 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
             [ $sourceColumn, $relatedColumn ] = $this->resolveProductSimilarColumns();
 
             if ( $sourceColumn === null || $relatedColumn === null ) return [];
-
 
             return ProductSimilar::query()
                 ->where( $sourceColumn, $productId )
@@ -429,7 +559,7 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
         $term = trim( $query );
         if ( $term === '' ) return [];
 
-        return \DB::connection( 'etilize' )->table( 'search_attribute' )
+        return SearchAttribute::query()
             ->join( 'search_attribute_values', 'search_attribute_values.valueid', '=', 'search_attribute.valueid' )
             ->join( 'product', 'search_attribute.productid', '=', 'product.productid' )
             ->where( 'search_attribute_values.value', 'like', "%{$term}%" )
