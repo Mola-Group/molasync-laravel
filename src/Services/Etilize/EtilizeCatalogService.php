@@ -3,6 +3,7 @@
 namespace Molaprise\Molasync\Services\Etilize;
 
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Schema;
@@ -27,16 +28,16 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
 
     public function resolveProductIdWithDiagnostics(array $identifiers): array
     {
-        if ( $this->sampleModeEnabled() ) {
-            return [
-                'product_id' => $this->resolveSampleModeProductId(),
-                'status' => 'sample_mode',
-                'source' => 'sample_mode',
-                'candidate' => null,
-                'match_count' => null,
-                'match_ids' => [],
-            ];
-        }
+//        if ( $this->sampleModeEnabled() ) {
+//            return [
+//                'product_id' => $this->resolveSampleModeProductId(),
+//                'status' => 'sample_mode',
+//                'source' => 'sample_mode',
+//                'candidate' => null,
+//                'match_count' => null,
+//                'match_ids' => [],
+//            ];
+//        }
 
         $manufacturerPartCandidates = $this->identifierCandidates( $identifiers[ 'manufacturer_part_number' ] ?? null );
 
@@ -182,14 +183,14 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
                 return $this->emptyDiagnostic( $source ?? $table, $value, 'columns_missing' );
             }
 
-            /** @var \Illuminate\Database\Eloquent\Model $modelClass */
+            /** @var Model $modelClass */
             $query = $modelClass::query();
 
             if ( $activeProductsOnly && in_array( 'isactive', $availableColumns, true ) ) {
                 $query->where( 'isactive', '=', 1 );
             }
 
-            $query->where( function (Builder $builder) use ($matchColumns, $value) {
+            $query = $query->where( function (Builder $builder) use ($matchColumns, $value) {
                 foreach ( $matchColumns as $index => $column ) {
                     if ( $index === 0 ) {
                         $builder->where( $column, '=', $value );
