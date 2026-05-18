@@ -10,7 +10,6 @@ use Illuminate\Support\Facades\Schema;
 use Molaprise\Molasync\Contracts\EtilizeCatalogServiceInterface;
 use Molaprise\Molasync\Models\Etilize\Product;
 use Molaprise\Molasync\Models\Etilize\ProductSimilar;
-use Molaprise\Molasync\Models\Etilize\ProductSku;
 use Molaprise\Molasync\Models\Etilize\SearchAttribute;
 use Throwable;
 
@@ -28,28 +27,40 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
 
     public function resolveProductIdWithDiagnostics(array $identifiers): array
     {
-//        if ( $this->sampleModeEnabled() ) {
-//            return [
-//                'product_id' => $this->resolveSampleModeProductId(),
-//                'status' => 'sample_mode',
-//                'source' => 'sample_mode',
-//                'candidate' => null,
-//                'match_count' => null,
-//                'match_ids' => [],
-//            ];
-//        }
-
         $manufacturerPartCandidates = $this->identifierCandidates( $identifiers[ 'manufacturer_part_number' ] ?? null );
-
-        foreach ( $manufacturerPartCandidates as $candidate ) {
-            $diagnostic = $this->resolveProductIdByManufacturerPartNumberWithDiagnostics( $candidate );
-
-            if ( $diagnostic[ 'product_id' ] !== null || $diagnostic[ 'status' ] === 'ambiguous' ) {
-                return $diagnostic;
-            }
-        }
-
         $upcCandidates = $this->identifierCandidates( $identifiers[ 'upc' ] ?? null, true );
+
+        if ( $manufacturerPartCandidates !== [] ) {
+            $lastDiagnostic = null;
+
+            foreach ( $manufacturerPartCandidates as $candidate ) {
+                $diagnostic = $this->resolveProductIdByManufacturerPartNumberWithDiagnostics( $candidate );
+                $lastDiagnostic = $diagnostic;
+
+                if ( $diagnostic[ 'product_id' ] !== null ) {
+                    return $diagnostic;
+                }
+
+                if ( $diagnostic[ 'status' ] === 'ambiguous' ) {
+                    $upcTieBreakDiagnostic = $this->resolveAmbiguousMpnByUpc( $diagnostic, $upcCandidates );
+
+                    if ( $upcTieBreakDiagnostic !== null ) {
+                        return $upcTieBreakDiagnostic;
+                    }
+
+                    return $diagnostic;
+                }
+            }
+
+            return $lastDiagnostic ?? [
+                'product_id' => null,
+                'status' => 'not_found',
+                'source' => 'product.mfgpartno',
+                'candidate' => $manufacturerPartCandidates[ 0 ],
+                'match_count' => 0,
+                'match_ids' => [],
+            ];
+        }
 
         foreach ( $upcCandidates as $candidate ) {
             $diagnostic = $this->resolveProductIdByUpcWithDiagnostics( $candidate );
@@ -142,20 +153,6 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
             if ( $diagnostic[ 'product_id' ] !== null || $diagnostic[ 'status' ] === 'ambiguous' ) {
                 return $diagnostic;
             }
-
-            $diagnostic = $this->resolveFromModelColumns(
-                ProductSku::class,
-                'productskus',
-                'productid',
-                [ 'upc', 'upccode', 'gtin', 'ean', 'ean13', 'barcode' ],
-                $candidate,
-                false,
-                'productskus.upc'
-            );
-
-            if ( $diagnostic[ 'product_id' ] !== null || $diagnostic[ 'status' ] === 'ambiguous' ) {
-                return $diagnostic;
-            }
         }
 
         return $this->emptyDiagnostic( 'upc', $candidates[ 0 ] ?? null );
@@ -200,6 +197,9 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
                 }
             } );
 
+            $sql = $query->toSql();
+            $bindings = $query->getBindings();
+
             $matches = $query
                 ->limit( 5 )
                 ->pluck( $idColumn )
@@ -216,6 +216,8 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
                     'candidate' => $value,
                     'match_count' => 1,
                     'match_ids' => $matches->all(),
+                    'query_sql' => $sql,
+                    'query_bindings' => $bindings,
                 ],
                 $matches->count() > 1 => [
                     'product_id' => null,
@@ -224,11 +226,20 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
                     'candidate' => $value,
                     'match_count' => $matches->count(),
                     'match_ids' => $matches->all(),
+                    'query_sql' => $sql,
+                    'query_bindings' => $bindings,
                 ],
-                default => $this->emptyDiagnostic( $source ?? $table, $value ),
+                default => $this->emptyDiagnostic( $source ?? $table, $value, 'not_found', $sql, $bindings ),
             };
-        } catch ( Throwable ) {
-            return $this->emptyDiagnostic( $source ?? $table, $value, 'query_error' );
+        } catch ( Throwable $exception ) {
+            return $this->emptyDiagnostic(
+                $source ?? $table,
+                $value,
+                'query_error',
+                null,
+                [],
+                $exception->getMessage()
+            );
         }
     }
 
@@ -270,6 +281,8 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
 
         if ( $candidates === [] ) return $this->emptyDiagnostic( 'mpn', null );
 
+        $lastDiagnostic = null;
+
         foreach ( $candidates as $candidate ) {
             $diagnostic = $this->resolveFromModelColumns(
                 Product::class,
@@ -277,16 +290,195 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
                 'productid',
                 [ 'mfgpartno' ],
                 $candidate,
-                true,
+                false,
                 'product.mfgpartno'
             );
+            $lastDiagnostic = $diagnostic;
+
+            if ( $diagnostic[ 'product_id' ] !== null || $diagnostic[ 'status' ] === 'ambiguous' ) {
+                return $diagnostic;
+            }
+
+            $diagnostic = $this->resolveNormalizedManufacturerPartNumber( $candidate );
+            $lastDiagnostic = $diagnostic;
 
             if ( $diagnostic[ 'product_id' ] !== null || $diagnostic[ 'status' ] === 'ambiguous' ) {
                 return $diagnostic;
             }
         }
 
-        return $this->emptyDiagnostic( 'mpn', $candidates[ 0 ] ?? null );
+        return $lastDiagnostic ?? $this->emptyDiagnostic( 'mpn', $candidates[ 0 ] ?? null );
+    }
+
+    private function resolveAmbiguousMpnByUpc(array $mpnDiagnostic, array $upcCandidates): ?array
+    {
+        $candidateProductIds = collect( $mpnDiagnostic[ 'match_ids' ] ?? [] )
+            ->map( fn($id) => (int)$id )
+            ->filter()
+            ->unique()
+            ->values();
+
+        if ( $candidateProductIds->isEmpty() || $upcCandidates === [] ) {
+            return null;
+        }
+
+        foreach ( $upcCandidates as $candidate ) {
+            $diagnostic = $this->resolveProductIdByUpcAmongProductIds( $candidate, $candidateProductIds->all(), $mpnDiagnostic );
+
+            if ( $diagnostic[ 'product_id' ] !== null ) {
+                return $diagnostic;
+            }
+        }
+
+        return null;
+    }
+
+    private function resolveProductIdByUpcAmongProductIds(string $upc, array $candidateProductIds, array $mpnDiagnostic): array
+    {
+        try {
+            if ( !$this->tableExists( 'product' ) ) {
+                return $this->emptyDiagnostic( 'product.mfgpartno+product.upc', $upc, 'table_missing' );
+            }
+
+            $availableColumns = $this->getColumnListing( 'product' );
+            $matchColumns = array_values( array_intersect( $availableColumns, [ 'upc', 'gtin', 'ean' ] ) );
+
+            if ( $matchColumns === [] || !in_array( 'productid', $availableColumns, true ) ) {
+                return $this->emptyDiagnostic( 'product.mfgpartno+product.upc', $upc, 'columns_missing' );
+            }
+
+            $query = Product::query()
+                ->whereIn( 'productid', $candidateProductIds )
+                ->where( function (Builder $builder) use ($matchColumns, $upc) {
+                    foreach ( $matchColumns as $index => $column ) {
+                        if ( $index === 0 ) {
+                            $builder->where( $column, '=', $upc );
+                        } else {
+                            $builder->orWhere( $column, '=', $upc );
+                        }
+                    }
+                } );
+
+            $sql = $query->toSql();
+            $bindings = $query->getBindings();
+
+            $matches = $query
+                ->pluck( 'productid' )
+                ->map( fn($id) => (int)$id )
+                ->filter()
+                ->unique()
+                ->values();
+
+            return match ( true ) {
+                $matches->count() === 1 => [
+                    'product_id' => $matches->first(),
+                    'status' => 'matched',
+                    'source' => 'product.mfgpartno+product.upc',
+                    'candidate' => $mpnDiagnostic[ 'candidate' ] ?? $upc,
+                    'match_count' => 1,
+                    'match_ids' => $matches->all(),
+                    'query_sql' => $sql,
+                    'query_bindings' => $bindings,
+                ],
+                $matches->count() > 1 => [
+                    'product_id' => null,
+                    'status' => 'ambiguous',
+                    'source' => 'product.mfgpartno+product.upc',
+                    'candidate' => $mpnDiagnostic[ 'candidate' ] ?? $upc,
+                    'match_count' => $matches->count(),
+                    'match_ids' => $matches->all(),
+                    'query_sql' => $sql,
+                    'query_bindings' => $bindings,
+                ],
+                default => $this->emptyDiagnostic(
+                    'product.mfgpartno+product.upc',
+                    $mpnDiagnostic[ 'candidate' ] ?? $upc,
+                    'not_found',
+                    $sql,
+                    $bindings
+                ),
+            };
+        } catch ( Throwable $exception ) {
+            return $this->emptyDiagnostic(
+                'product.mfgpartno+product.upc',
+                $mpnDiagnostic[ 'candidate' ] ?? $upc,
+                'query_error',
+                null,
+                [],
+                $exception->getMessage()
+            );
+        }
+    }
+
+    private function resolveNormalizedManufacturerPartNumber(string $candidate): array
+    {
+        $normalizedCandidate = $this->normalizeManufacturerPartNumber( $candidate );
+
+        if ( $normalizedCandidate === '' ) {
+            return $this->emptyDiagnostic( 'product.mfgpartno.normalized', $candidate );
+        }
+
+        $prefix = addcslashes( trim( $candidate ), '\\%_' ) . '%';
+
+        try {
+            $query = Product::query();
+
+            $query->where( 'mfgpartno', 'like', $prefix );
+            $sql = $query->toSql();
+            $bindings = $query->getBindings();
+
+            $matches = $query
+                ->limit( 50 )
+                ->get( [ 'productid', 'mfgpartno' ] )
+                ->filter( function (Product $product) use ($normalizedCandidate) {
+                    $mfgPartNo = (string)$product->getAttribute( 'mfgpartno' );
+
+                    return $mfgPartNo !== ''
+                        && $this->normalizeManufacturerPartNumber( $mfgPartNo ) === $normalizedCandidate;
+                } )
+                ->pluck( 'productid' )
+                ->map( fn($id) => (int)$id )
+                ->unique()
+                ->values();
+
+            return match ( true ) {
+                $matches->count() === 1 => [
+                    'product_id' => $matches->first(),
+                    'status' => 'matched',
+                    'source' => 'product.mfgpartno.normalized',
+                    'candidate' => $candidate,
+                    'match_count' => 1,
+                    'match_ids' => $matches->all(),
+                    'query_sql' => $sql,
+                    'query_bindings' => $bindings,
+                ],
+                $matches->count() > 1 => [
+                    'product_id' => null,
+                    'status' => 'ambiguous',
+                    'source' => 'product.mfgpartno.normalized',
+                    'candidate' => $candidate,
+                    'match_count' => $matches->count(),
+                    'match_ids' => $matches->all(),
+                    'query_sql' => $sql,
+                    'query_bindings' => $bindings,
+                ],
+                default => $this->emptyDiagnostic( 'product.mfgpartno.normalized', $candidate, 'not_found', $sql, $bindings ),
+            };
+        } catch ( Throwable $exception ) {
+            return $this->emptyDiagnostic(
+                'product.mfgpartno.normalized',
+                $candidate,
+                'query_error',
+                $sql ?? null,
+                $bindings ?? [],
+                $exception->getMessage()
+            );
+        }
+    }
+
+    private function normalizeManufacturerPartNumber(string $value): string
+    {
+        return preg_replace( '/[^A-Z0-9]+/', '', strtoupper( trim( $value ) ) ) ?? '';
     }
 
     private function resolveProductIdFromSearchAttributes(string $value): ?int
@@ -331,12 +523,26 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
                 ],
                 default => $this->emptyDiagnostic( 'search_attribute', $value ),
             };
-        } catch ( Throwable ) {
-            return $this->emptyDiagnostic( 'search_attribute', $value, 'query_error' );
+        } catch ( Throwable $exception ) {
+            return $this->emptyDiagnostic(
+                'search_attribute',
+                $value,
+                'query_error',
+                null,
+                [],
+                $exception->getMessage()
+            );
         }
     }
 
-    private function emptyDiagnostic(string $source, ?string $candidate, string $status = 'not_found'): array
+    private function emptyDiagnostic(
+        string $source,
+        ?string $candidate,
+        string $status = 'not_found',
+        ?string $querySql = null,
+        array $queryBindings = [],
+        ?string $exceptionMessage = null,
+    ): array
     {
         return [
             'product_id' => null,
@@ -345,6 +551,9 @@ class EtilizeCatalogService implements EtilizeCatalogServiceInterface
             'candidate' => $candidate,
             'match_count' => 0,
             'match_ids' => [],
+            'query_sql' => $querySql,
+            'query_bindings' => $queryBindings,
+            'exception_message' => $exceptionMessage,
         ];
     }
 
