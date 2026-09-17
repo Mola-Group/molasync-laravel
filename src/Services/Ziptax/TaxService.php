@@ -399,7 +399,7 @@ class TaxService implements TaxServiceInterface
             $this->cache_key( 'location', "{$this->version}:" . json_encode( $normalizedLocation ) ),
             fn() => $this->fetchWithFallback( $normalizedLocation )
         );
-    }
+}
 
     public function calculate(string $address, float $subtotal): ?float
     {
